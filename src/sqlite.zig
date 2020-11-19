@@ -121,6 +121,10 @@ pub const Database = struct {
     pub fn changes(self: *const @This()) c_int {
         return sqlite3_changes(self.db);
     }
+
+    pub fn lastInsertRowId(self: @This()) i64 {
+        return sqlite3_last_insert_rowid(self.db);
+    }
 };
 
 pub const Statement = struct {

@@ -13,7 +13,7 @@ usingnamespace @import("c.zig");
 const S: isize = -1;
 const ZIG_SQLITE_TRANSIENT: fn (?*c_void) callconv(.C) void = @intToPtr(fn (?*c_void) callconv(.C) void, @bitCast(usize, S));
 
-pub const SQLite = struct {
+pub const Database = struct {
     db: *sqlite3,
 
     pub fn open(filename: [:0]const u8) Error!@This() {
@@ -83,7 +83,7 @@ pub const SQLite = struct {
         return sqlite3_errmsg(self.db);
     }
 
-    pub fn prepare(self: *const @This(), sql: [:0]const u8, sqlTail: ?*[:0]const u8) Error!?SQLiteStmt {
+    pub fn prepare(self: *const @This(), sql: [:0]const u8, sqlTail: ?*[:0]const u8) Error!?Statement {
         var stmt: ?*sqlite3_stmt = null;
         const sqlLen = @intCast(c_int, sql.len + 1);
         var tail: ?[*]u8 = undefined;
@@ -99,38 +99,38 @@ pub const SQLite = struct {
             }
         }
 
-        return SQLiteStmt{
+        return Statement{
             .stmt = stmt orelse return null,
         };
     }
 
-    pub fn exec(self: *const @This(), sql: [:0]const u8) SQLiteRowsIterator {
-        return SQLiteRowsIterator.init(self, sql);
+    pub fn exec(self: *const @This(), sql: [:0]const u8) RowsIterator {
+        return RowsIterator.init(self, sql);
     }
 
-    pub fn execBind(self: *const @This(), comptime sql: [:0]const u8, args: anytype) !SQLiteRowsIterator {
+    pub fn execBind(self: *const @This(), comptime sql: [:0]const u8, args: anytype) !RowsIterator {
         var tail: [:0]const u8 = sql;
         var stmtOpt = try self.prepare(sql, &tail);
         if (stmtOpt) |stmt| {
             errdefer stmt.finalize() catch {};
             try bind.bind(&stmt, sql, args);
         }
-        return SQLiteRowsIterator{ .db = self, .remaingSql = tail, .stmt = stmtOpt };
+        return RowsIterator{ .db = self, .remaingSql = tail, .stmt = stmtOpt };
     }
 };
 
-pub const SQLiteStmt = struct {
+pub const Statement = struct {
     stmt: *sqlite3_stmt,
 
-    pub fn step(self: *const SQLiteStmt) Error!Success {
+    pub fn step(self: *const Statement) Error!Success {
         return try checkSqliteErr(sqlite3_step(self.stmt));
     }
 
-    pub fn columnCount(self: *const SQLiteStmt) c_int {
+    pub fn columnCount(self: *const Statement) c_int {
         return sqlite3_column_count(self.stmt);
     }
 
-    pub fn columnType(self: *const SQLiteStmt, col: c_int) SQLiteTypeTag {
+    pub fn columnType(self: *const Statement, col: c_int) FieldTypeTag {
         switch (sqlite3_column_type(self.stmt, col)) {
             SQLITE_INTEGER => return .Integer,
             SQLITE_FLOAT => return .Float,
@@ -141,54 +141,54 @@ pub const SQLiteStmt = struct {
         }
     }
 
-    pub fn column(self: *const SQLiteStmt, col: c_int) SQLiteType {
+    pub fn column(self: *const Statement, col: c_int) FieldType {
         switch (self.columnType(col)) {
-            .Integer => return SQLiteType{ .Integer = self.columnInt64(col) },
-            .Float => return SQLiteType{ .Float = self.columnFloat(col) },
-            .Text => return SQLiteType{ .Text = self.columnText(col) },
-            .Blob => return SQLiteType{ .Blob = self.columnBlob(col) },
-            .Null => return SQLiteType{ .Null = {} },
+            .Integer => return FieldType{ .Integer = self.columnInt64(col) },
+            .Float => return FieldType{ .Float = self.columnFloat(col) },
+            .Text => return FieldType{ .Text = self.columnText(col) },
+            .Blob => return FieldType{ .Blob = self.columnBlob(col) },
+            .Null => return FieldType{ .Null = {} },
         }
     }
 
-    pub fn columnInt(self: *const SQLiteStmt, col: c_int) i32 {
+    pub fn columnInt(self: *const Statement, col: c_int) i32 {
         return sqlite3_column_int(self.stmt, col);
     }
 
-    pub fn columnInt64(self: *const SQLiteStmt, col: c_int) i64 {
+    pub fn columnInt64(self: *const Statement, col: c_int) i64 {
         return sqlite3_column_int64(self.stmt, col);
     }
 
-    pub fn columnFloat(self: *const SQLiteStmt, col: c_int) f64 {
+    pub fn columnFloat(self: *const Statement, col: c_int) f64 {
         return sqlite3_column_double(self.stmt, col);
     }
 
-    pub fn columnText(self: *const SQLiteStmt, col: c_int) []const u8 {
+    pub fn columnText(self: *const Statement, col: c_int) []const u8 {
         const num_bytes = sqlite3_column_bytes(self.stmt, col);
         const bytes = sqlite3_column_text(self.stmt, col);
         return bytes[0..@intCast(usize, num_bytes)];
     }
 
-    pub fn columnBlob(self: *const SQLiteStmt, col: c_int) []const u8 {
+    pub fn columnBlob(self: *const Statement, col: c_int) []const u8 {
         const num_bytes = sqlite3_column_bytes(self.stmt, col);
         const bytes = @ptrCast([*]const u8, sqlite3_column_blob(self.stmt, col));
         return bytes[0..@intCast(usize, num_bytes)];
     }
 
-    pub fn bindInt64(self: *const SQLiteStmt, paramIdx: c_int, number: i64) Error!void {
+    pub fn bindInt64(self: *const Statement, paramIdx: c_int, number: i64) Error!void {
         _ = try checkSqliteErr(sqlite3_bind_int64(self.stmt, paramIdx, number));
     }
 
-    pub fn bindText(self: *const SQLiteStmt, paramIdx: c_int, text: []const u8) Error!void {
+    pub fn bindText(self: *const Statement, paramIdx: c_int, text: []const u8) Error!void {
         _ = try checkSqliteErr(sqlite3_bind_text(self.stmt, paramIdx, text.ptr, @intCast(c_int, text.len), ZIG_SQLITE_TRANSIENT));
     }
 
-    pub fn finalize(self: *const SQLiteStmt) Error!void {
+    pub fn finalize(self: *const Statement) Error!void {
         _ = try checkSqliteErr(sqlite3_finalize(self.stmt));
     }
 };
 
-pub const SQLiteTypeTag = enum {
+pub const FieldTypeTag = enum {
     Integer,
     Float,
     Text,
@@ -196,7 +196,7 @@ pub const SQLiteTypeTag = enum {
     Null,
 };
 
-pub const SQLiteType = union(SQLiteTypeTag) {
+pub const FieldType = union(FieldTypeTag) {
     Integer: i64,
     Float: f64,
     Text: []const u8,
@@ -211,8 +211,8 @@ pub const SQLiteType = union(SQLiteTypeTag) {
         return .{ .Text = str };
     }
 
-    pub fn eql(self: *const SQLiteType, other: *const SQLiteType) bool {
-        if (@as(SQLiteTypeTag, self.*) != @as(SQLiteTypeTag, other.*)) {
+    pub fn eql(self: *const FieldType, other: *const FieldType) bool {
+        if (@as(FieldTypeTag, self.*) != @as(FieldTypeTag, other.*)) {
             return false;
         }
         switch (self.*) {
@@ -226,14 +226,14 @@ pub const SQLiteType = union(SQLiteTypeTag) {
     }
 };
 
-pub const SQLiteRow = struct {
-    stmt: SQLiteStmt,
+pub const Row = struct {
+    stmt: Statement,
 
     pub fn columnCount(self: *const @This()) c_int {
         return self.stmt.columnCount();
     }
 
-    pub fn column(self: *const @This(), col: c_int) SQLiteType {
+    pub fn column(self: *const @This(), col: c_int) FieldType {
         return self.stmt.column(col);
     }
 
@@ -250,12 +250,12 @@ pub const SQLiteRow = struct {
     }
 };
 
-pub const SQLiteRowsIterator = struct {
-    db: *const SQLite,
+pub const RowsIterator = struct {
+    db: *const Database,
     remaingSql: [:0]const u8,
-    stmt: ?SQLiteStmt = null,
+    stmt: ?Statement = null,
 
-    pub fn init(db: *const SQLite, sql: [:0]const u8) SQLiteRowsIterator {
+    pub fn init(db: *const Database, sql: [:0]const u8) RowsIterator {
         var self: @This() = .{
             .db = db,
             .remaingSql = sql,
@@ -264,7 +264,7 @@ pub const SQLiteRowsIterator = struct {
     }
 
     pub const Item = union(enum) {
-        Row: SQLiteRow,
+        Row: Row,
         Done: void,
         Error: Error,
     };
@@ -276,7 +276,7 @@ pub const SQLiteRowsIterator = struct {
         if (self.stmt) |stmt| {
             const step_res = stmt.step() catch |e| return Item{ .Error = e };
             switch (step_res) {
-                .Row, .Ok => return Item{ .Row = SQLiteRow{ .stmt = stmt } },
+                .Row, .Ok => return Item{ .Row = Row{ .stmt = stmt } },
                 .Done => {
                     self.finalizeStmt() catch |e| return Item{ .Error = e };
                     return Item{ .Done = .{} };
@@ -313,7 +313,7 @@ pub const SQLiteRowsIterator = struct {
 };
 
 test "open in memory sqlite db" {
-    const db = try SQLite.open(":memory:");
+    const db = try Database.open(":memory:");
 
     // Create the hello table
     const sqlCreateTable = "CREATE TABLE hello (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL);";
@@ -339,13 +339,13 @@ test "open in memory sqlite db" {
                 const val = cur_stmt.column(col);
                 switch (row) {
                     0 => switch (col) {
-                        0 => std.testing.expectEqual(SQLiteType{ .Integer = 1 }, val),
-                        1 => std.testing.expect(SQLiteType.text("world").eql(&val)),
+                        0 => std.testing.expectEqual(FieldType{ .Integer = 1 }, val),
+                        1 => std.testing.expect(FieldType.text("world").eql(&val)),
                         else => panic("unexpected col in test", null),
                     },
                     1 => switch (col) {
-                        0 => std.testing.expectEqual(SQLiteType{ .Integer = 2 }, val),
-                        1 => std.testing.expect(SQLiteType.text("foo").eql(&val)),
+                        0 => std.testing.expectEqual(FieldType{ .Integer = 2 }, val),
+                        1 => std.testing.expect(FieldType.text("foo").eql(&val)),
                         else => panic("unexpected col in test", null),
                     },
                     else => panic("unexpected row in test", null),
@@ -361,7 +361,7 @@ test "open in memory sqlite db" {
 }
 
 test "Empty SQL prepared" {
-    const db = try SQLite.open(":memory:");
+    const db = try Database.open(":memory:");
     const create_stmt = try db.prepare("", null);
     std.debug.assert(create_stmt == null);
 
@@ -369,16 +369,16 @@ test "Empty SQL prepared" {
 }
 
 test "exec function" {
-    const db = try SQLite.open(":memory:");
+    const db = try Database.open(":memory:");
 
     // Create the hello table
     try db.exec("CREATE TABLE hello (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL);").finish();
     // Insert values and get results
     try db.exec("INSERT INTO hello (name) VALUES (\"world\"), (\"foo\");").finish();
 
-    const expected = [_][2]SQLiteType{
-        .{ SQLiteType.int(1), SQLiteType.text("world") },
-        .{ SQLiteType.int(2), SQLiteType.text("foo") },
+    const expected = [_][2]FieldType{
+        .{ FieldType.int(1), FieldType.text("world") },
+        .{ FieldType.int(2), FieldType.text("foo") },
     };
 
     var rows = db.exec("SELECT * FROM hello;");
@@ -408,11 +408,11 @@ test "exec function" {
 }
 
 test "exec multiple statement" {
-    const db = try SQLite.open(":memory:");
+    const db = try Database.open(":memory:");
 
-    const expected = [_][2]SQLiteType{
-        .{ SQLiteType.int(1), SQLiteType.text("world") },
-        .{ SQLiteType.int(2), SQLiteType.text("foo") },
+    const expected = [_][2]FieldType{
+        .{ FieldType.int(1), FieldType.text("world") },
+        .{ FieldType.int(2), FieldType.text("foo") },
     };
 
     // Create the hello table, insert test values, and get results
@@ -449,7 +449,7 @@ test "exec multiple statement" {
 }
 
 test "bind parameters" {
-    const db = try SQLite.open(":memory:");
+    const db = try Database.open(":memory:");
     try db.exec("CREATE TABLE hello (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL);").finish();
 
     const NAME = "world!";
@@ -463,8 +463,8 @@ test "bind parameters" {
     try (try db.execBind("INSERT INTO hello (name) VALUES (?);", .{NAME2})).finish();
 
     var rows = db.exec("SELECT name FROM hello;");
-    std.testing.expect(rows.next().?.Row.column(0).eql(&SQLiteType.text(NAME)));
-    std.testing.expect(rows.next().?.Row.column(0).eql(&SQLiteType.text(NAME2)));
+    std.testing.expect(rows.next().?.Row.column(0).eql(&FieldType.text(NAME)));
+    std.testing.expect(rows.next().?.Row.column(0).eql(&FieldType.text(NAME2)));
     std.testing.expect(rows.next().? == .Done);
     std.testing.expect(rows.next() == null);
 

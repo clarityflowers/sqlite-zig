@@ -5,7 +5,8 @@ pub const errors = @import("error.zig");
 pub const Error = errors.Error;
 pub const Success = errors.Success;
 pub const checkSqliteErr = errors.checkSqliteErr;
-const bind = @import("bind.zig");
+const binding = @import("bind.zig");
+const log = std.log.scoped(.sqlite3);
 
 usingnamespace @import("c.zig");
 
@@ -83,41 +84,6 @@ pub const Database = struct {
         return sqlite3_errmsg(self.db);
     }
 
-    pub fn prepare(self: *const @This(), sql: [:0]const u8, sqlTail: ?*[:0]const u8) Error!?Statement {
-        var stmt: ?*sqlite3_stmt = null;
-        const sqlLen = @intCast(c_int, sql.len + 1);
-        var tail: ?[*]u8 = undefined;
-
-        var rc = sqlite3_prepare_v2(self.db, sql, sqlLen, &stmt, &tail);
-
-        _ = try checkSqliteErr(rc);
-
-        if (tail) |cTail| {
-            if (sqlTail) |sqlTailNotNull| {
-                const offset = @ptrToInt(cTail) - @ptrToInt(sql.ptr);
-                sqlTailNotNull.* = sql[offset..];
-            }
-        }
-
-        return Statement{
-            .stmt = stmt orelse return null,
-        };
-    }
-
-    pub fn exec(self: *const @This(), sql: [:0]const u8) RowsIterator {
-        return RowsIterator.init(self, sql);
-    }
-
-    pub fn execBind(self: *const @This(), comptime sql: [:0]const u8, args: anytype) !RowsIterator {
-        var tail: [:0]const u8 = sql;
-        var stmtOpt = try self.prepare(sql, &tail);
-        if (stmtOpt) |stmt| {
-            errdefer stmt.finalize() catch {};
-            try bind.bind(&stmt, sql, args);
-        }
-        return RowsIterator{ .db = self, .remaingSql = tail, .stmt = stmtOpt };
-    }
-
     pub fn changes(self: *const @This()) c_int {
         return sqlite3_changes(self.db);
     }
@@ -125,13 +91,99 @@ pub const Database = struct {
     pub fn lastInsertRowId(self: @This()) i64 {
         return sqlite3_last_insert_rowid(self.db);
     }
+
+    pub fn prepare(self: *const @This(), sql: [:0]const u8) Error!Statement {
+        var it = self.prepareEach(sql);
+        const result = (try it.next()) orelse unreachable;
+        for (it.sql) |c| {
+            if (c != ' ' and c != '\r' and c != '\t' and c != '\n') {
+                log.alert("Prepare had leftover sql:\n{}", .{it.sql});
+                return error.Error;
+            }
+        }
+        return result;
+    }
+
+    pub fn exec(self: *const @This(), sql: [:0]const u8) Error!void {
+        var it = self.prepareEach(sql);
+        try it.finish();
+    }
+
+    pub fn execBind(self: @This(), sql: [:0]const u8, args: anytype) Error!void {
+        const statement = try self.prepare(sql);
+        defer statement.finalize() catch {};
+        try statement.bind(args);
+        try statement.finish();
+    }
+
+    pub fn prepareEach(self: @This(), sql: [:0]const u8) PrepareIterator {
+        return PrepareIterator{
+            .db = self,
+            .original_sql = sql,
+            .sql = sql,
+        };
+    }
+
+    pub const PrepareIterator = struct {
+        db: Database,
+        original_sql: [:0]const u8,
+        sql: [:0]const u8,
+
+        pub fn next(self: *@This()) Error!?Statement {
+            if (self.sql.len == 0) return null;
+            var stmt: ?*sqlite3_stmt = null;
+            const sqlLen = @intCast(c_int, self.sql.len + 1);
+            var tail: ?[*:0]u8 = undefined;
+
+            var rc = sqlite3_prepare_v2(self.db.db, self.sql.ptr, sqlLen, &stmt, &tail);
+            self.sql = if (tail) |t|
+                self.sql[@ptrToInt(t) - @ptrToInt(self.sql.ptr) ..]
+            else
+                "";
+
+            _ = checkSqliteErr(rc) catch |err| {
+                var diff = self.original_sql.len - self.sql.len;
+                var line: usize = 1;
+                var start_of_line: usize = 0;
+                for (self.original_sql[0..diff]) |c, i| {
+                    if (c == '\n') {
+                        line += 1;
+                        start_of_line = i + 1;
+                    }
+                }
+                const end_of_line = (loop: for (self.original_sql[diff..]) |c, i| {
+                    if (c == '\n') break :loop i;
+                } else self.original_sql.len) + diff;
+                log.alert("Error preparing SQL statement: {}", .{self.db.errmsg()});
+                switch (err) {
+                    error.Error => {
+                        log.alert("{}: {}", .{ line, self.original_sql[start_of_line..end_of_line] });
+                    },
+                    else => {},
+                }
+                return err;
+            };
+
+            return Statement{
+                .stmt = stmt orelse return null,
+            };
+        }
+
+        pub fn finish(self: *@This()) Error!void {
+            while (try self.next()) |statement| {
+                defer statement.finalize() catch {};
+                try statement.finish();
+            }
+        }
+    };
 };
 
 pub const Statement = struct {
     stmt: *sqlite3_stmt,
 
-    pub fn step(self: *const Statement) Error!Success {
-        return try checkSqliteErr(sqlite3_step(self.stmt));
+    // returns true if the statement produced another row
+    pub fn step(self: *const Statement) Error!bool {
+        return (try checkSqliteErr(sqlite3_step(self.stmt))) == .Row;
     }
 
     pub fn columnCount(self: *const Statement) c_int {
@@ -181,6 +233,13 @@ pub const Statement = struct {
         const num_bytes = sqlite3_column_bytes(self.stmt, col);
         const bytes = @ptrCast([*]const u8, sqlite3_column_blob(self.stmt, col));
         return bytes[0..@intCast(usize, num_bytes)];
+    }
+
+    pub fn bind(self: *const Statement, args: anytype) !void {
+        comptime var index = 0;
+        inline while (index < args.len) : (index += 1) {
+            try binding.bindType(self, index + 1, args[index]);
+        }
     }
 
     pub fn bindInt64(self: *const Statement, paramIdx: c_int, number: i64) Error!void {
@@ -246,114 +305,24 @@ pub const FieldType = union(FieldTypeTag) {
     }
 };
 
-pub const Row = struct {
-    stmt: Statement,
-
-    pub fn columnCount(self: *const @This()) c_int {
-        return self.stmt.columnCount();
-    }
-
-    pub fn column(self: *const @This(), col: c_int) FieldType {
-        return self.stmt.column(col);
-    }
-
-    pub fn columnInt(self: *const @This(), col: c_int) i32 {
-        return self.stmt.columnInt(col);
-    }
-
-    pub fn columnInt64(self: *const @This(), col: c_int) i64 {
-        return self.stmt.columnInt64(col);
-    }
-
-    pub fn columnText(self: *const @This(), col: c_int) []const u8 {
-        return self.stmt.columnText(col);
-    }
-};
-
-pub const RowsIterator = struct {
-    db: *const Database,
-    remaingSql: [:0]const u8,
-    stmt: ?Statement = null,
-
-    pub fn init(db: *const Database, sql: [:0]const u8) RowsIterator {
-        var self: @This() = .{
-            .db = db,
-            .remaingSql = sql,
-        };
-        return self;
-    }
-
-    pub const Item = union(enum) {
-        Row: Row,
-        Done: void,
-        Error: Error,
-    };
-
-    pub fn next(self: *@This()) ?Item {
-        if (self.stmt == null) {
-            self.prepareNextStmt() catch |e| return Item{ .Error = e };
-        }
-        if (self.stmt) |stmt| {
-            const step_res = stmt.step() catch |e| return Item{ .Error = e };
-            switch (step_res) {
-                .Row, .Ok => return Item{ .Row = Row{ .stmt = stmt } },
-                .Done => {
-                    self.finalizeStmt() catch |e| return Item{ .Error = e };
-                    return Item{ .Done = .{} };
-                },
-            }
-        } else {
-            return null;
-        }
-    }
-
-    pub fn finish(self: *@This()) !void {
-        while (self.next()) |item| {
-            switch (item) {
-                .Error => |e| return e,
-                else => {},
-            }
-        }
-    }
-
-    fn finalizeStmt(self: *@This()) !void {
-        if (self.stmt) |stmt| {
-            try stmt.finalize();
-            self.stmt = null;
-        }
-    }
-
-    fn prepareNextStmt(self: *@This()) !void {
-        if (self.stmt) |stmt| {
-            try self.finalizeStmt();
-        }
-        const curSql = self.remaingSql;
-        self.stmt = try self.db.prepare(curSql, &self.remaingSql);
-    }
-};
-
 test "open in memory sqlite db" {
     const db = try Database.open(":memory:");
 
     // Create the hello table
     const sqlCreateTable = "CREATE TABLE hello (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL);";
-    const create_stmt = (try db.prepare(sqlCreateTable, null)) orelse return error.NullCreateStmt;
-    _ = try create_stmt.step();
-    _ = try create_stmt.finalize();
+    const create_stmt = try db.prepare(sqlCreateTable);
+    try create_stmt.finish();
+    try create_stmt.finalize();
 
     // Insert values and get results
     const sql =
         \\ INSERT INTO hello (name) VALUES ("world"), ("foo");
         \\ SELECT * FROM hello;
     ;
-    var tailSql: [:0]const u8 = sql;
-
-    while (true) {
-        const curSql = tailSql;
-
-        const cur_stmt = (try db.prepare(curSql, &tailSql)) orelse break;
+    var it = db.prepareEach(sql);
+    while (try it.next()) |cur_stmt| {
         var row: usize = 0;
-        while ((try cur_stmt.step()) != .Done) {
+        while (try cur_stmt.step()) {
             var col: c_int = 0;
             while (col < cur_stmt.columnCount()) {
                 const val = cur_stmt.column(col);
@@ -376,15 +345,13 @@ test "open in memory sqlite db" {
         }
         try cur_stmt.finalize();
     }
-
     try db.close();
 }
 
 test "Empty SQL prepared" {
     const db = try Database.open(":memory:");
-    const create_stmt = try db.prepare("", null);
-    std.debug.assert(create_stmt == null);
-
+    var it = db.prepareEach("");
+    std.debug.assert((try it.next()) == null);
     try db.close();
 }
 
@@ -392,38 +359,30 @@ test "exec function" {
     const db = try Database.open(":memory:");
 
     // Create the hello table
-    try db.exec("CREATE TABLE hello (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL);").finish();
+    try db.exec("CREATE TABLE hello (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL);");
     // Insert values and get results
-    try db.exec("INSERT INTO hello (name) VALUES (\"world\"), (\"foo\");").finish();
+    try db.exec("INSERT INTO hello (name) VALUES (\"world\"), (\"foo\");");
 
     const expected = [_][2]FieldType{
         .{ FieldType.int(1), FieldType.text("world") },
         .{ FieldType.int(2), FieldType.text("foo") },
     };
 
-    var rows = db.exec("SELECT * FROM hello;");
+    var statement = try db.prepare("SELECT * FROM hello;");
 
     var rowIdx: usize = 0;
-    while (rows.next()) |rows_item| {
-        const row = switch (rows_item) {
-            .Row => |r| r,
-            .Done => continue,
-            .Error => panic("Error unwrapping row", null),
-        };
+    while (try statement.step()) : (rowIdx += 1) {
         const expectedRow = expected[rowIdx];
 
         var colIdx: usize = 0;
-        while (colIdx < row.columnCount()) {
-            const col = row.column(@intCast(c_int, colIdx));
+        while (colIdx < statement.columnCount()) : (colIdx += 1) {
+            const col = statement.column(@intCast(c_int, colIdx));
             const expectedCol = expectedRow[colIdx];
             std.testing.expect(expectedCol.eql(&col));
-
-            colIdx += 1;
         }
-
-        rowIdx += 1;
     }
 
+    try statement.finalize();
     try db.close();
 }
 
@@ -436,24 +395,21 @@ test "exec multiple statement" {
     };
 
     // Create the hello table, insert test values, and get results
-    var rows = db.exec(
+    try db.exec(
         \\ CREATE TABLE hello (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL);
         \\ INSERT INTO hello (name) VALUES ("world"), ("foo");
+    );
+    const statement = try db.prepare(
         \\ SELECT * FROM hello;
     );
 
     var rowIdx: usize = 0;
-    while (rows.next()) |rows_item| {
-        const row = switch (rows_item) {
-            .Row => |r| r,
-            .Done => continue,
-            .Error => |e| return e,
-        };
+    while (try statement.step()) {
         const expectedRow = expected[rowIdx];
 
         var colIdx: usize = 0;
-        while (colIdx < row.columnCount()) {
-            const col = row.column(@intCast(c_int, colIdx));
+        while (colIdx < statement.columnCount()) {
+            const col = statement.column(@intCast(c_int, colIdx));
             const expectedCol = expectedRow[colIdx];
             std.testing.expect(expectedCol.eql(&col));
 
@@ -465,28 +421,31 @@ test "exec multiple statement" {
 
     std.testing.expectEqual(@as(usize, 2), rowIdx);
 
+    try statement.finalize();
     try db.close();
 }
 
 test "bind parameters" {
     const db = try Database.open(":memory:");
-    try db.exec("CREATE TABLE hello (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL);").finish();
+    try db.exec("CREATE TABLE hello (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL);");
 
     const NAME = "world!";
     const NAME2 = "foo";
 
-    const insert = (try db.prepare("INSERT INTO hello (name) VALUES (?);", null)).?;
+    const insert = try db.prepare("INSERT INTO hello (name) VALUES (?);");
     try insert.bindText(1, NAME);
-    _ = try insert.step();
+    try insert.finish();
+
+    try db.execBind("INSERT INTO hello (name) VALUES (?);", .{NAME2});
+
+    var statement = try db.prepare("SELECT name FROM hello;");
+    std.testing.expect(try statement.step());
+    std.testing.expectEqualStrings(statement.column(0).Text, NAME);
+    std.testing.expect(try statement.step());
+    std.testing.expectEqualStrings(statement.column(0).Text, NAME2);
+    std.testing.expect(!try statement.step());
+
+    try statement.finalize();
     try insert.finalize();
-
-    try (try db.execBind("INSERT INTO hello (name) VALUES (?);", .{NAME2})).finish();
-
-    var rows = db.exec("SELECT name FROM hello;");
-    std.testing.expect(rows.next().?.Row.column(0).eql(&FieldType.text(NAME)));
-    std.testing.expect(rows.next().?.Row.column(0).eql(&FieldType.text(NAME2)));
-    std.testing.expect(rows.next().? == .Done);
-    std.testing.expect(rows.next() == null);
-
     try db.close();
 }

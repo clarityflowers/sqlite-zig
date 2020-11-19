@@ -117,6 +117,10 @@ pub const Database = struct {
         }
         return RowsIterator{ .db = self, .remaingSql = tail, .stmt = stmtOpt };
     }
+
+    pub fn changes(self: *const @This()) c_int {
+        return sqlite3_changes(self.db);
+    }
 };
 
 pub const Statement = struct {

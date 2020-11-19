@@ -55,6 +55,13 @@ pub fn bindType(stmt: *const SQLiteStmt, comptime paramIdx: comptime_int, value:
                 @compileError("Arrays of type " ++ @typeName(arr.child) ++ " are not supported.");
             }
         },
+        .Optional => |optional| {
+            if (value == null) {
+                return stmt.bindNull(paramIdx);
+            } else {
+                return bindType(stmt, paramIdx, value.?);
+            }
+        },
         else => |typeInfo| @compileError("Binding type of " ++ @typeName(T) ++ " is not supported."),
     }
 }

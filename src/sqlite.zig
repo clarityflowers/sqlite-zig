@@ -186,6 +186,18 @@ pub const Statement = struct {
     pub fn finalize(self: *const Statement) Error!void {
         _ = try checkSqliteErr(sqlite3_finalize(self.stmt));
     }
+
+    pub fn reset(self: *const Statement) Error!void {
+        _ = try checkSqliteErr(sqlite3_reset(self.stmt));
+    }
+
+    pub fn dbHandle(self: *const Statement) Database {
+        return Database{ .db = sqlite3_db_handle(self.stmt).? };
+    }
+
+    pub fn finish(self: @This()) Error!void {
+        while (try self.step()) {}
+    }
 };
 
 pub const FieldTypeTag = enum {

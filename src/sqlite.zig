@@ -242,6 +242,10 @@ pub const Statement = struct {
         }
     }
 
+    pub fn bindNull(self: *const Statement, paramIdx: c_int) Error!void {
+        _ = try checkSqliteErr(sqlite3_bind_null(self.stmt, paramIdx));
+    }
+
     pub fn bindInt64(self: *const Statement, paramIdx: c_int, number: i64) Error!void {
         _ = try checkSqliteErr(sqlite3_bind_int64(self.stmt, paramIdx, number));
     }

@@ -151,9 +151,9 @@ pub const Database = struct {
                         start_of_line = i + 1;
                     }
                 }
-                const end_of_line = (loop: for (self.original_sql[diff..]) |c, i| {
+                const end_of_line = loop: for (self.original_sql[start_of_line..]) |c, i| {
                     if (c == '\n') break :loop i;
-                } else self.original_sql.len) + diff;
+                } else self.original_sql.len - 1;
                 log.alert("Error preparing SQL statement: {}", .{self.db.errmsg()});
                 switch (err) {
                     error.Error => {

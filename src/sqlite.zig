@@ -157,7 +157,7 @@ pub const Database = struct {
                 log.alert("Error preparing SQL statement: {}", .{self.db.errmsg()});
                 switch (err) {
                     error.Error => {
-                        log.alert("{}: {}", .{ line, self.original_sql[start_of_line..end_of_line] });
+                        log.alert("{}: {}", .{ line, self.original_sql[start_of_line .. start_of_line + end_of_line] });
                     },
                     else => {},
                 }

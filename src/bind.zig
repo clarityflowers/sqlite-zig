@@ -62,6 +62,9 @@ pub fn bindType(stmt: *const Statement, comptime paramIdx: comptime_int, value: 
                 return bindType(stmt, paramIdx, value.?);
             }
         },
+        .Null => {
+            return stmt.bindNull(paramIdx);
+        },
         else => |typeInfo| @compileError("Binding type of " ++ @typeName(T) ++ " is not supported."),
     }
 }

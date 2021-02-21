@@ -2,11 +2,11 @@ const std = @import("std");
 const errors = @import("error.zig");
 const Error = errors.Error;
 const checkSqliteErr = errors.checkSqliteErr;
-const SQLiteStmt = @import("sqlite.zig").SQLiteStmt;
+const Statement = @import("sqlite.zig").Statement;
 
 usingnamespace @import("c.zig");
 
-pub fn bind(stmt: *const SQLiteStmt, comptime sql: [:0]const u8, args: anytype) Error!void {
+pub fn bind(stmt: *const Statement, comptime sql: [:0]const u8, args: anytype) Error!void {
     // TODO: Make this more robust. Make it clear that SQL is not actually being parsed
     comptime var nextArg = 0;
     inline for (sql) |c| {
@@ -24,7 +24,7 @@ pub fn bind(stmt: *const SQLiteStmt, comptime sql: [:0]const u8, args: anytype) 
     }
 }
 
-pub fn bindType(stmt: *const SQLiteStmt, comptime paramIdx: comptime_int, value: anytype) Error!void {
+pub fn bindType(stmt: *const Statement, comptime paramIdx: comptime_int, value: anytype) Error!void {
     const T = @TypeOf(value);
     switch (@typeInfo(T)) {
         .Int => {
@@ -53,6 +53,13 @@ pub fn bindType(stmt: *const SQLiteStmt, comptime paramIdx: comptime_int, value:
                 stmt.bindText(paramIdx, value);
             } else {
                 @compileError("Arrays of type " ++ @typeName(arr.child) ++ " are not supported.");
+            }
+        },
+        .Optional => |optional| {
+            if (value == null) {
+                return stmt.bindNull(paramIdx);
+            } else {
+                return bindType(stmt, paramIdx, value.?);
             }
         },
         else => |typeInfo| @compileError("Binding type of " ++ @typeName(T) ++ " is not supported."),

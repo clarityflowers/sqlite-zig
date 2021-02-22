@@ -97,7 +97,7 @@ pub const Database = struct {
         const result = (try it.next()) orelse unreachable;
         for (it.sql) |c| {
             if (c != ' ' and c != '\r' and c != '\t' and c != '\n') {
-                log.alert("Prepare had leftover sql:\n{}", .{it.sql});
+                log.alert("Prepare had leftover sql:\n{s}", .{it.sql});
                 return error.Error;
             }
         }
@@ -154,10 +154,10 @@ pub const Database = struct {
                 const end_of_line = loop: for (self.original_sql[start_of_line..]) |c, i| {
                     if (c == '\n') break :loop i;
                 } else self.original_sql.len - 1;
-                log.alert("Error preparing SQL statement: {}", .{self.db.errmsg()});
+                log.alert("Error preparing SQL statement: {s}", .{self.db.errmsg()});
                 switch (err) {
                     error.Error => {
-                        log.alert("{}: {}", .{ line, self.original_sql[start_of_line .. start_of_line + end_of_line] });
+                        log.alert("{}: {s}", .{ line, self.original_sql[start_of_line .. start_of_line + end_of_line] });
                     },
                     else => {},
                 }
